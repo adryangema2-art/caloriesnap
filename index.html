@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>CalorieSnap — Estimativa de calorias por foto</title>
+<style>
+  body{font-family:Inter,Arial,Helvetica,sans-serif;background:#f6f7fb;color:#111;margin:0;padding:18px}
+  .wrap{max-width:920px;margin:0 auto}
+  header{display:flex;gap:16px;align-items:center}
+  header h1{font-size:1.4rem;margin:0}
+  .card{background:#fff;padding:18px;border-radius:12px;box-shadow:0 6px 20px rgba(0,0,0,.06);margin-top:18px}
+  .row{display:flex;gap:18px;align-items:flex-start}
+  .col{flex:1}
+  img.preview{max-width:100%;border-radius:10px;display:block}
+  .pred{margin-top:10px}
+  .pred-item{padding:8px;border-radius:8px;border:1px solid #eee;margin-bottom:8px;display:flex;justify-content:space-between;align-items:center}
+  label{font-weight:600}
+  .small{font-size:0.9rem;color:#666}
+  .btn{display:inline-block;padding:10px 14px;border-radius:10px;background:#167d7a;color:#fff;text-decoration:none;border:none;cursor:pointer}
+  footer{font-size:0.85rem;color:#666;margin-top:18px}
+  .note{background:#fff7e6;padding:10px;border-radius:8px;margin-top:12px;border:1px solid #fde6b9}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>CalorieSnap</h1>
+      <div class="small">Tire/Envie uma foto de alimento e obtenha uma estimativa rápida de calorias</div>
+    </header>
+
+    <div class="card">
+      <div class="row">
+        <div class="col" style="max-width:420px">
+          <label for="file">1) Escolha uma foto</label>
+          <input id="file" type="file" accept="image/*"/>
+          <div style="margin-top:12px">
+            <label for="size">2) Ajuste o tamanho da porção</label>
+            <select id="size" style="width:100%;padding:10px;border-radius:8px;margin-top:6px">
+              <option value="0.5">Meia porção (~0.5x)</option>
+              <option value="1" selected>Porção média (~1x)</option>
+              <option value="1.5">Porção 1.5x</option>
+              <option value="2">Porção grande (~2x)</option>
+            </select>
+          </div>
+
+          <div style="margin-top:12px">
+            <button id="analyze" class="btn">Analisar imagem</button>
+            <button id="reset" class="btn" style="background:#ccc;color:#111;margin-left:8px">Limpar</button>
+          </div>
+
+          <p class="small" style="margin-top:12px">Modelo roda no seu navegador — as imagens não são enviadas a nenhum servidor.</p>
+        </div>
+
+        <div class="col">
+          <div id="previewWrap" class="card" style="padding:12px">
+            <img id="preview" class="preview" alt="preview" src="" style="display:none"/>
+            <div id="status" class="small">Modelo: carregando...</div>
+            <div id="predictions" class="pred"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="note">
+        <strong>Atenção:</strong> estimativa aproximada. As calorias dependem de ingredientes, cozimento e tamanho real. Use apenas como referência.
+      </div>
+    </div>
+
+    <footer>
+      <div>Quer melhorar a precisão? Dá pra integrar modelos de visão + segmentação/treino com backend — posso te ajudar depois.</div>
+    </footer>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.9.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/mobilenet@2.1.0/dist/mobilenet.min.js"></script>
+<script>
+  let model;
+  const fileEl = document.getElementById('file');
+  const preview = document.getElementById('preview');
+  const status = document.getElementById('status');
+  const predsEl = document.getElementById('predictions');
+  const analyzeBtn = document.getElementById('analyze');
+  const resetBtn = document.getElementById('reset');
+  const sizeEl = document.getElementById('size');
+
+  const foodMap = {
+    'banana': ['Banana (1 unidade média)', 105],
+    'apple': ['Maçã (1 unidade média)', 95],
+    'orange': ['Laranja (1 média)', 62],
+    'pizza': ['Fatia de pizza (média)', 285],
+    'hotdog': ['Cachorro-quente', 290],
+    'hamburger': ['Hambúrguer', 354],
+    'ice cream': ['Sorvete (1 bola)', 137],
+    'french fries': ['Batata frita (porção média)', 365],
+    'sandwich': ['Sanduíche (médio)', 300],
+    'salad': ['Salada (tigela)', 150],
+    'fried rice': ['Arroz frito (1 prato)', 330],
+    'spaghetti': ['Massa (porção média)', 220],
+    'egg': ['Ovo (1 unidade)', 78],
+    'cupcake': ['Bolo pequeno / cupcake', 200],
+    'broccoli': ['Brócolis (100g)', 35],
+    'steak': ['Bife (porção média)', 271],
+    'pancake': ['Panqueca (1 média)', 86],
+    'cake': ['Fatia de bolo', 350],
+    'sushi': ['Sushi (1 unidade média)', 60]
+  };
+
+  function findFoodEstimate(label){
+    label = label.toLowerCase();
+    for(const key in foodMap){
+      if(label.includes(key)) return foodMap[key];
+    }
+    const words = label.split(/[, ]+/);
+    for(const w of words){
+      if(foodMap[w]) return foodMap[w];
+    }
+    return [label, null];
+  }
+
+  async function loadModel(){
+    status.innerText = 'Carregando modelo (pode demorar alguns segundos)...';
+    try{
+      model = await mobilenet.load();
+      status.innerText = 'Modelo carregado. Envie uma foto e clique em "Analisar imagem".';
+    }catch(e){
+      console.error(e);
+      status.innerText = 'Erro ao carregar o modelo. Verifique a conexão.';
+    }
+  }
+
+  fileEl.addEventListener('change', (e)=>{
+    const f = e.target.files[0];
+    if(!f) return;
+    const url = URL.createObjectURL(f);
+    preview.src = url;
+    preview.style.display = 'block';
+    predsEl.innerHTML = '';
+    status.innerText = 'Imagem carregada. Clique em "Analisar imagem".';
+  });
+
+  analyzeBtn.addEventListener('click', async ()=>{
+    if(!model) { alert('Modelo ainda não carregado. Aguarde...'); return; }
+    if(!preview.src){ alert('Selecione uma imagem primeiro.'); return; }
+    status.innerText = 'Analisando imagem...';
+    predsEl.innerHTML = '';
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = preview.src;
+    img.onload = async ()=>{
+      const predictions = await model.classify(img);
+      if(!predictions || predictions.length === 0){ status.innerText = 'Nenhuma previsão encontrada.'; return; }
+      status.innerText = 'Resultados:';
+      predictions.slice(0,3).forEach(pred=>{
+        const [display, cal] = findFoodEstimate(pred.className);
+        const probability = (pred.probability * 100).toFixed(1);
+        const portionMultiplier = parseFloat(sizeEl.value || '1');
+        const estText = cal ? `${Math.round(cal * portionMultiplier)} kcal (porção ~${portionMultiplier}x)` : 'Estimativa indisponível para esse item';
+        const item = document.createElement('div');
+        item.className = 'pred-item';
+        item.innerHTML = `<div><strong>${display}</strong><div class="small">${pred.className} — confiança ${probability}%</div></div><div style="text-align:right"><div style="font-weight:700">${estText}</div></div>`;
+        predsEl.appendChild(item);
+      });
+      if(!predictions.some(p=> findFoodEstimate(p.className)[1])) {
+        const note = document.createElement('div');
+        note.className = 'small';
+        note.style.marginTop = '8px';
+        note.innerText = 'Não encontrei um mapeamento direto para esse alimento — resultado pode estar errado. Escolha manualmente o tipo de alimento no futuro para estimativa mais precisa.';
+        predsEl.appendChild(note);
+      }
+    };
+    img.onerror = ()=>{ status.innerText = 'Erro ao carregar a imagem para análise.'; };
+  });
+
+  resetBtn.addEventListener('click', ()=>{
+    fileEl.value = '';
+    preview.src = '';
+    preview.style.display = 'none';
+    predsEl.innerHTML = '';
+    status.innerText = 'Modelo carregado. Envie uma foto e clique em "Analisar imagem".';
+  });
+
+  loadModel();
+</script>
+</body>
+</html>
